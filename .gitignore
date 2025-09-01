@@ -3,3 +3,5 @@ trajectories
 dockerfile
 task.md
 .env.sweagent
+__pycache__
+tasks
