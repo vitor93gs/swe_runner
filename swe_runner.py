@@ -1,46 +1,9 @@
 #!/usr/bin/env python3
-"""
-swe_runner.py
-
-Run SWE-agent against a repository that's already baked into your Docker image
-("preexisting" repo mode) — without editing your original Dockerfile — and
-with zero extra CLI flags beyond the essentials:
-
-  python swe_runner.py \
-    --dockerfile ./Dockerfile \
-    --image-tag myproj:latest \
-    --prompt-file task.md \
-    --model gemini/gemini-2.5-pro
-
-What this script does automatically:
-
-1) Builds your base image (unless --skip-build).
-2) Builds a tiny overlay image on top of your image that:
-   - Installs Python 3, pipx, git, curl, CA certs (OS-family aware).
-   - Installs SWE-ReX (`swerex-remote`) via pipx.
-   - Exposes ~/.local/bin on PATH.
-   - Creates a `python` shim if only `python3` exists.
-3) Detects the repo directory name from the Dockerfile’s final WORKDIR
-   (fallback: "app") for SWE-agent’s `env.repo.repo_name`.
-4) Detects if `.git` and `git` are available inside the container at that repo;
-   if not, it disables repo reset so it works across node/python/rust/go/etc.
-5) Uses SWE-agent’s default config plus a tiny override that disables history
-   processors (avoids Gemini context-cache edge cases).
-6) Runs `python -m sweagent run` with `env.repo.type=preexisting`.
-
-Notes:
-- You still need a valid API key for your model (e.g. GEMINI_API_KEY / GOOGLE_API_KEY).
-- Works with Debian/Ubuntu, Alpine, and RHEL/Fedora/CentOS bases. Unknown bases
-  fall back to best-effort steps.
-
-"""
-
 from __future__ import annotations
 
 import argparse
 import os
 import re
-import pathlib
 import subprocess
 import sys
 import tempfile
@@ -110,8 +73,8 @@ def detect_os_family(image: str) -> str:
     return "unknown"
 
 
-def infer_repo_name_from_dockerfile(dockerfile: Path) -> str | None:
-    """Take the last WORKDIR from the Dockerfile and return its basename."""
+def infer_repo_dir_from_dockerfile(dockerfile: Path) -> str | None:
+    """Take the last WORKDIR from the Dockerfile and return its full path."""
     try:
         txt = dockerfile.read_text(encoding="utf-8", errors="ignore")
     except Exception:
@@ -120,17 +83,29 @@ def infer_repo_name_from_dockerfile(dockerfile: Path) -> str | None:
     if not matches:
         return None
     final_workdir = matches[-1].group(1).strip().strip("'").strip('"').rstrip("/")
-    name = Path(final_workdir).name
-    return name or None
+    return final_workdir or None
 
-
-def container_repo_has_git(image: str, repo_name: str) -> bool:
+def image_workdir(image: str) -> str | None:
     """
-    Check inside the image whether /<repo_name> has a .git directory AND the git binary exists.
+    Return the image's configured WorkingDir via `docker image inspect`.
+    This is authoritative and survives multi-stage builds.
     """
     try:
         out = subprocess.run(
-            ["docker", "run", "--rm", "-w", f"/{repo_name}", image, "sh", "-lc",
+            ["docker", "image", "inspect", image, "--format", "{{.Config.WorkingDir}}"],
+            check=True, capture_output=True, text=True
+        ).stdout.strip()
+        return out or None
+    except Exception:
+        return None
+
+def container_repo_has_git(image: str, repo_dir: str) -> bool:
+    """
+    Check inside the image whether /<repo_dir> has a .git directory AND the git binary exists.
+    """
+    try:
+        out = subprocess.run(
+            ["docker", "run", "--rm", "-w", f"{repo_dir}", image, "sh", "-lc",
              'test -d .git && command -v git >/dev/null 2>&1 && echo yes || echo no'],
             check=True, capture_output=True, text=True
         ).stdout.strip()
@@ -175,7 +150,7 @@ def build_overlay_with_rex(base_image: str, overlay_tag: str) -> None:
         ]
     elif fam == "rhel":
         lines += [
-            "(microdnf install -y python3 python3-pip python3-virtualenv git curl ca-certificates || "
+            "RUN (microdnf install -y python3 python3-pip python3-virtualenv git curl ca-certificates || "
             " dnf install -y python3 python3-pip python3-virtualenv git curl ca-certificates || "
             " yum install -y python3 python3-pip python3-virtualenv git curl ca-certificates)",
             "RUN python3 -m ensurepip --upgrade || true",
@@ -197,6 +172,22 @@ def build_overlay_with_rex(base_image: str, overlay_tag: str) -> None:
         ]
 
     dockerfile = "\n".join(lines)
+    with tempfile.TemporaryDirectory() as tmp:
+        df = Path(tmp) / "Dockerfile"
+        df.write_text(dockerfile, encoding="utf-8")
+        sh(["docker", "build", "-f", str(df), "-t", overlay_tag, tmp])
+
+def add_repo_symlink_to_overlay(overlay_tag: str, repo_dir: str, repo_name: str) -> None:
+    """
+    Create /<repo_name> -> <repo_dir> inside the overlay so SWE-agent can `cd /<repo_name>`.
+    This is a tiny "one-layer" image on top of the overlay.
+    """
+    dockerfile = (
+        f"FROM {overlay_tag}\n"
+        'SHELL ["/bin/sh","-lc"]\n'
+        # Create/overwrite a root-level alias so SWE-agent can `cd /<repo_name>`
+        f'RUN ln -sfn "{repo_dir}" "/{repo_name}" || true\n'
+    )
     with tempfile.TemporaryDirectory() as tmp:
         df = Path(tmp) / "Dockerfile"
         df.write_text(dockerfile, encoding="utf-8")
@@ -284,7 +275,16 @@ def main():
         sh(["docker", "build", "-f", str(args.dockerfile), "-t", args.image_tag, str(ctx)])
 
     # 2) Build overlay with swe-rex + toolchain
-    overlay_tag = args.overlay_tag or (args.image_tag.split(":")[0] + ":with-rex")
+    if args.overlay_tag:
+        overlay_tag = args.overlay_tag
+    else:
+        # Keep registry/repo; if there's a tag, suffix it; else add ":with-rex"
+        img_tail = args.image_tag.rsplit("/", 1)[-1]
+        if ":" in img_tail:
+            base, tag = args.image_tag.rsplit(":", 1)
+            overlay_tag = f"{base}:{tag}-with-rex"
+        else:
+            overlay_tag = f"{args.image_tag}:with-rex"
     build_overlay_with_rex(args.image_tag, overlay_tag)
 
     # 3) Ensure SWE-agent is importable locally
@@ -294,11 +294,17 @@ def main():
     default_cfg = locate_default_cfg()
     cacheless_cfg = make_cacheless_override()
 
-    # 5) Repo dir name (from final WORKDIR), fallback to "app"
-    repo_name = infer_repo_name_from_dockerfile(args.dockerfile) or "app"
+    # 5) Discover repo dir (prefer the image config WorkingDir; fallback to Dockerfile; else /app)
+    repo_dir = image_workdir(args.image_tag) or infer_repo_dir_from_dockerfile(args.dockerfile) or "/app"
+    if not repo_dir.startswith("/"):
+        repo_dir = "/" + repo_dir
+    repo_name = Path(repo_dir).name or "app"
+
+    # Ensure a root-level alias so SWE-agent can cd /<repo_name>
+    add_repo_symlink_to_overlay(overlay_tag, repo_dir, repo_name)
 
     # 6) If the baked repo isn't a git repo (or git missing), disable reset for robustness
-    can_reset = container_repo_has_git(overlay_tag, repo_name)
+    can_reset = container_repo_has_git(overlay_tag, repo_dir)
 
     # 7) Compose the SWE-agent run command
     cmd = [
