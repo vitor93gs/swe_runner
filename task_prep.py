@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import csv
 import io
-import os
 import re
 import sys
 import shutil
@@ -22,6 +21,18 @@ except Exception:
 # --------------------------- small shell helper ---------------------------
 
 def sh(cmd: List[str], **kw) -> subprocess.CompletedProcess:
+    """Execute a shell command and return its result.
+
+    Args:
+        cmd (List[str]): Command to execute as a list of strings.
+        **kw: Additional keyword arguments to pass to subprocess.run.
+
+    Returns:
+        subprocess.CompletedProcess: Result of the command execution.
+
+    Raises:
+        subprocess.CalledProcessError: If the command returns a non-zero exit status.
+    """
     print("▶", " ".join(map(str, cmd)))
     return subprocess.run(cmd, check=True, text=True, **kw)
 
@@ -31,9 +42,25 @@ def sh(cmd: List[str], **kw) -> subprocess.CompletedProcess:
 _SHEETS_HOSTS = {"docs.google.com", "sheets.google.com"}
 
 def _is_http_url(s: str) -> bool:
+    """Check if a string represents an HTTP(S) URL.
+
+    Args:
+        s (str): String to check.
+
+    Returns:
+        bool: True if the string starts with 'http://' or 'https://', False otherwise.
+    """
     return s.startswith("http://") or s.startswith("https://")
 
 def _is_google_sheets_url(url: str) -> bool:
+    """Determine if a URL is a Google Sheets URL.
+
+    Args:
+        url (str): URL to check.
+
+    Returns:
+        bool: True if the URL is a Google Sheets URL, False otherwise.
+    """
     try:
         host = urlparse(url).netloc
         return any(host.endswith(h) for h in _SHEETS_HOSTS) and "/spreadsheets/" in url
@@ -41,11 +68,19 @@ def _is_google_sheets_url(url: str) -> bool:
         return False
 
 def _sheets_url_to_csv(url: str) -> str:
-    """
-    Convert a typical Sheets URL to a CSV export URL.
-    - If gid is present, keep it (exports that tab).
-    - Otherwise, exports the active tab.
-    Ref: CSV export pattern '/export?format=csv' and using gid for a specific sheet. :contentReference[oaicite:0]{index=0}
+    """Convert a Google Sheets URL to its CSV export URL.
+
+    Args:
+        url (str): Google Sheets URL to convert.
+
+    Returns:
+        str: CSV export URL for the sheet. If the input URL already appears
+            to be an export URL, returns it unchanged.
+
+    Note:
+        - If a gid parameter is present in the URL, it is preserved to export
+          the specific tab.
+        - If no gid is present, exports the active tab.
     """
     parsed = urlparse(url)
     # /spreadsheets/d/<ID>/...
@@ -61,8 +96,17 @@ def _sheets_url_to_csv(url: str) -> str:
     return base
 
 def _fetch_csv_text(sheet_src: str) -> str:
-    """
-    Load CSV text from either a Google Sheets URL or a local CSV path.
+    """Load CSV text from either a Google Sheets URL or a local CSV path.
+
+    Args:
+        sheet_src (str): URL or file path to the CSV source.
+
+    Returns:
+        str: Content of the CSV file.
+
+    Raises:
+        requests.exceptions.RequestException: If HTTP request fails.
+        IOError: If local file cannot be read.
     """
     if _is_http_url(sheet_src):
         url = _sheets_url_to_csv(sheet_src) if _is_google_sheets_url(sheet_src) else sheet_src
@@ -78,10 +122,23 @@ def _fetch_csv_text(sheet_src: str) -> str:
 
 
 def read_tasks_from_sheet(sheet_src: str) -> List[Dict[str, str]]:
-    """
-    Expect headers:
-      task_id, updated_issue_description, dockerfile, test_command, test_patch
-    Returns list of dict rows with string values (trimmed).
+    """Read task definitions from a CSV sheet.
+
+    Args:
+        sheet_src (str): URL or file path to the sheet containing task definitions.
+
+    Returns:
+        List[Dict[str, str]]: List of task definitions, where each task is a dictionary
+            with the following expected headers as keys:
+            - task_id: Unique identifier for the task
+            - updated_issue_description: Description of the task
+            - dockerfile: Path or content of the Dockerfile
+            - test_command: Command to run tests
+            - test_patch: Path to test patch file
+            All values are strings with whitespace trimmed.
+
+    Note:
+        Rows without a task_id are skipped.
     """
     csv_text = _fetch_csv_text(sheet_src)
     reader = csv.DictReader(io.StringIO(csv_text))
@@ -103,6 +160,15 @@ _DRIVE_PATTERNS = [
 ]
 
 def extract_drive_file_id(url: str) -> Optional[str]:
+    """Extract the file ID from a Google Drive URL.
+
+    Args:
+        url (str): Google Drive URL to parse.
+
+    Returns:
+        Optional[str]: The file ID if found in the URL using any of the known
+            patterns (file/d/, open?id=, uc?id=), None if no pattern matches.
+    """
     for pat in _DRIVE_PATTERNS:
         m = pat.search(url)
         if m:
@@ -110,9 +176,22 @@ def extract_drive_file_id(url: str) -> Optional[str]:
     return None
 
 def _ensure_gdown_available() -> Optional[str]:
-    """
-    Try python API, else 'gdown' CLI. Install if needed.
-    gdown is the reliable way to download Drive files (handles large file consent). :contentReference[oaicite:1]{index=1}
+    """Ensure the gdown package is available either as Python module or CLI tool.
+
+    Attempts to:
+    1. Import gdown as a Python module
+    2. If that fails, check for gdown CLI
+    3. If neither exists, attempt to install via pip
+
+    Returns:
+        Optional[str]: 
+            - "python" if gdown is available as a Python module
+            - "cli" if only the command-line tool is available
+            - None if gdown cannot be found or installed
+
+    Note:
+        gdown is used as it reliably handles Google Drive downloads,
+        including large files that require consent.
     """
     try:
         import gdown  # type: ignore
@@ -133,11 +212,19 @@ def _ensure_gdown_available() -> Optional[str]:
         return None
 
 def download_drive_file(url: str, output_path: Path) -> None:
-    """
-    Best-effort downloader:
-      1) Try gdown (python or CLI)
-      2) Fallback to a simple direct /uc?export=download&id=FILE_ID (works for small files)
-    Direct link pattern reference. :contentReference[oaicite:2]{index=2}
+    """Download a file from Google Drive using the best available method.
+
+    Args:
+        url (str): Google Drive URL of the file to download.
+        output_path (Path): Path where the downloaded file should be saved.
+
+    Note:
+        Uses a two-step approach for maximum reliability:
+        1. Attempts to use gdown (either Python module or CLI tool)
+        2. Falls back to direct download URL for small files if gdown fails
+
+    Raises:
+        RuntimeError: If all download attempts fail.
     """
     file_id = extract_drive_file_id(url)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,6 +253,15 @@ def download_drive_file(url: str, output_path: Path) -> None:
 
 @dataclass
 class TaskPaths:
+    """Container for paths to task-related files.
+
+    Attributes:
+        root (Path): Root directory of the task folder.
+        dockerfile (Path): Path to the task's Dockerfile.
+        task_md (Path): Path to the task's markdown description file.
+        test_cmd (Path): Path to the file containing test commands.
+        test_patch (Path): Path to the task's test patch file.
+    """
     root: Path
     dockerfile: Path
     task_md: Path
@@ -173,8 +269,29 @@ class TaskPaths:
     test_patch: Path
 
 def prepare_task_folder(base_dir: Path, row: Dict[str, str]) -> TaskPaths:
-    """
-    Create `tasks/task_id_<ID>/` and materialize all assets.
+    """Create and populate a task directory with required files.
+
+    Creates a directory named 'task_id_<ID>' under base_dir and populates it with:
+    1. task.md - Task description file
+    2. Dockerfile - From Drive link or local path
+    3. test_command.txt - Test command specification
+    4. test_patch.tar - Optional test patch file from Drive link
+
+    Args:
+        base_dir (Path): Base directory where task folder will be created.
+        row (Dict[str, str]): Task data from spreadsheet with following keys:
+            - task_id: Unique identifier for the task
+            - updated_issue_description: Content for task.md
+            - dockerfile: Source path/URL for Dockerfile
+            - test_command: Content for test_command.txt
+            - test_patch: Optional source path/URL for test patch
+
+    Returns:
+        TaskPaths: Object containing paths to all created files.
+
+    Raises:
+        ValueError: If required fields are missing from row.
+        RuntimeError: If file downloads fail.
     """
     task_id = str(row["task_id"]).strip()
     root = base_dir / f"task_id_{task_id}"

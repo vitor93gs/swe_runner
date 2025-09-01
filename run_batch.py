@@ -11,11 +11,32 @@ from task_prep import read_tasks_from_sheet, prepare_task_folder, TaskPaths
 
 
 def sh(cmd: List[str], **kw) -> subprocess.CompletedProcess:
+    """Execute a shell command and return its result.
+
+    Args:
+        cmd (List[str]): Command to execute as a list of strings.
+        **kw: Additional keyword arguments to pass to subprocess.run.
+
+    Returns:
+        subprocess.CompletedProcess: Result of the command execution.
+
+    Raises:
+        subprocess.CalledProcessError: If the command returns a non-zero exit status.
+    """
     print("▶", " ".join(map(str, cmd)))
     return subprocess.run(cmd, check=True, text=True, **kw)
 
 
 def main() -> None:
+    """Execute the main batch processing logic for running SWE tasks.
+
+    This function handles command line argument parsing and orchestrates the execution of multiple
+    SWE tasks defined in a Google Sheet or CSV file. Each task is processed using swe_runner.py
+    in its own environment with task-specific configurations.
+
+    Returns:
+        None
+    """
     ap = argparse.ArgumentParser(description="Batch runner for swe_runner.py over tasks listed in a sheet/CSV.")
     ap.add_argument("--sheet", required=True,
                     help="Google Sheets URL (shareable) or path to a local CSV with headers: "

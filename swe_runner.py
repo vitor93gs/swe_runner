@@ -13,11 +13,31 @@ from pathlib import Path
 # --------------------------- shell helpers ---------------------------
 
 def sh(cmd, **kw) -> subprocess.CompletedProcess:
+    """Execute a shell command and return its result.
+
+    Args:
+        cmd: Command to execute as a string or list of strings.
+        **kw: Additional keyword arguments to pass to subprocess.run.
+
+    Returns:
+        subprocess.CompletedProcess: Result of the command execution.
+
+    Raises:
+        subprocess.CalledProcessError: If the command returns a non-zero exit status.
+    """
     print("▶", " ".join(map(str, cmd)))
     return subprocess.run(cmd, check=True, text=True, **kw)
 
 
-def ensure(cmd: str) -> None:
+def ensure_command(cmd: str) -> None:
+    """Ensure a command is available and working in the system.
+
+    Args:
+        cmd (str): Command to check for availability.
+
+    Raises:
+        SystemExit: If the command is not found or not working properly.
+    """
     try:
         subprocess.run([cmd, "--version"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
@@ -26,7 +46,19 @@ def ensure(cmd: str) -> None:
 
 
 def ensure_model_key(model: str) -> None:
-    """Require a reasonable provider key based on the model string."""
+    """Ensure appropriate API key is available for the specified model.
+
+    Args:
+        model (str): Name of the model to check API key for (e.g., 'gemini').
+
+    Raises:
+        SystemExit: If required API key is not found in environment variables
+            or .env.sweagent file.
+
+    Note:
+        For Gemini models, looks for GEMINI_API_KEY or GOOGLE_API_KEY.
+        For other models, checks for any environment variable containing 'KEY'.
+    """
     model_l = model.lower()
     # load .env.sweagent if present
     env_file = Path(".env.sweagent")
@@ -53,7 +85,18 @@ def ensure_model_key(model: str) -> None:
 # --------------------------- image / container helpers ---------------------------
 
 def detect_os_family(image: str) -> str:
-    """Return: debian | alpine | rhel | unknown"""
+    """Detect the operating system family of a Docker image.
+
+    Args:
+        image (str): Name/tag of the Docker image to check.
+
+    Returns:
+        str: Operating system family name, one of:
+            - 'debian': For Debian/Ubuntu based images
+            - 'alpine': For Alpine Linux based images
+            - 'rhel': For RHEL/Fedora/CentOS/Rocky based images
+            - 'unknown': If OS family cannot be determined
+    """
     try:
         out = subprocess.run(
             ["docker", "run", "--rm", image, "sh", "-lc", "cat /etc/os-release 2>/dev/null || true"],
@@ -71,7 +114,16 @@ def detect_os_family(image: str) -> str:
 
 
 def infer_repo_dir_from_dockerfile(dockerfile: Path) -> str | None:
-    """Take the last WORKDIR from the Dockerfile and return its full path."""
+    """Extract the final working directory path from a Dockerfile.
+
+    Args:
+        dockerfile (Path): Path to the Dockerfile to analyze.
+
+    Returns:
+        str | None: The last WORKDIR path specified in the Dockerfile,
+            with quotes and trailing slashes removed.
+            Returns None if no WORKDIR is found or file cannot be read.
+    """
     try:
         txt = dockerfile.read_text(encoding="utf-8", errors="ignore")
     except Exception:
@@ -83,9 +135,18 @@ def infer_repo_dir_from_dockerfile(dockerfile: Path) -> str | None:
     return final_workdir or None
 
 def image_workdir(image: str) -> str | None:
-    """
-    Return the image's configured WorkingDir via `docker image inspect`.
-    This is authoritative and survives multi-stage builds.
+    """Get the working directory configured in a Docker image.
+
+    Args:
+        image (str): Name/tag of the Docker image to inspect.
+
+    Returns:
+        str | None: The configured WorkingDir from the image metadata,
+            or None if not set or if inspection fails.
+
+    Note:
+        This method uses `docker image inspect` and is authoritative,
+        working correctly even with multi-stage builds.
     """
     try:
         out = subprocess.run(
@@ -97,8 +158,15 @@ def image_workdir(image: str) -> str | None:
         return None
 
 def container_repo_has_git(image: str, repo_dir: str) -> bool:
-    """
-    Check inside the image whether /<repo_dir> has a .git directory AND the git binary exists.
+    """Check if a Docker container has both a Git repository and Git binary.
+
+    Args:
+        image (str): Name/tag of the Docker image to check.
+        repo_dir (str): Path to directory expected to contain .git folder.
+
+    Returns:
+        bool: True if both .git directory exists in repo_dir AND git binary
+            is available in the container's PATH, False otherwise.
     """
     try:
         out = subprocess.run(
@@ -114,11 +182,20 @@ def container_repo_has_git(image: str, repo_dir: str) -> bool:
 # --------------------------- overlay builder ---------------------------
 
 def build_overlay_with_rex(base_image: str, overlay_tag: str) -> None:
-    """
-    Build a tiny overlay that:
-      - Installs Python 3 + pipx (+ python shim), git, curl, ca-certs (OS-family aware)
-      - Installs swe-rex via pipx
-      - Exposes ~/.local/bin on PATH
+    """Build a Docker image overlay with SWE runtime dependencies.
+
+    Creates a new Docker image that adds the following to the base image:
+        - Python 3, pipx (with python shim if needed)
+        - Git, curl, and CA certificates (installed appropriately for OS family)
+        - swe-rex package installed via pipx
+        - ~/.local/bin added to PATH
+
+    Args:
+        base_image (str): Name/tag of the base Docker image to build upon.
+        overlay_tag (str): Tag to assign to the resulting overlay image.
+
+    Raises:
+        subprocess.CalledProcessError: If Docker build fails.
     """
     fam = detect_os_family(base_image)
 
@@ -175,9 +252,19 @@ def build_overlay_with_rex(base_image: str, overlay_tag: str) -> None:
         sh(["docker", "build", "-f", str(df), "-t", overlay_tag, tmp])
 
 def add_repo_symlink_to_overlay(overlay_tag: str, repo_dir: str, repo_name: str) -> None:
-    """
-    Create /<repo_name> -> <repo_dir> inside the overlay so SWE-agent can `cd /<repo_name>`.
-    This is a tiny "one-layer" image on top of the overlay.
+    """Add a repository symlink to a Docker overlay image.
+
+    Creates a new Docker image layer that adds a symbolic link from /<repo_name>
+    to the actual repository directory, enabling SWE-agent to navigate to the
+    repository using a consistent path.
+
+    Args:
+        overlay_tag (str): Tag of the Docker overlay image to modify.
+        repo_dir (str): Target directory path in the container.
+        repo_name (str): Name to use for the symlink at root level.
+
+    Raises:
+        subprocess.CalledProcessError: If Docker build fails.
     """
     dockerfile = (
         f"FROM {overlay_tag}\n"
@@ -193,14 +280,27 @@ def add_repo_symlink_to_overlay(overlay_tag: str, repo_dir: str, repo_name: str)
 # --------------------------- SWE-agent bootstrap ---------------------------
 
 def ensure_sweagent_from_source(python_exe: str, local_src: Path | None, ref: str) -> None:
-    """Ensure `sweagent` imports; if not, install editable from source (stable and reliable)."""
+    """Ensure SWE-agent package is available, installing from source if needed.
+
+    Attempts to import sweagent module and if not available, clones and installs
+    it from source in editable mode.
+
+    Args:
+        python_exe (str): Path to Python executable to use for installation.
+        local_src (Path | None): Path to existing local source directory, if any.
+        ref (str): Git reference (branch/tag/commit) to use when cloning.
+
+    Raises:
+        ImportError: If sweagent module cannot be imported after installation.
+        subprocess.CalledProcessError: If git clone or pip install fails.
+    """
     try:
         __import__("sweagent")
         return
     except Exception:
         pass
 
-    ensure("git")
+    ensure_command("git")
     if local_src is None:
         tmpdir = tempfile.mkdtemp(prefix="sweagent-src-")
         local_src = Path(tmpdir)
@@ -217,7 +317,17 @@ def ensure_sweagent_from_source(python_exe: str, local_src: Path | None, ref: st
 
 
 def locate_default_cfg() -> str:
-    """Find installed SWE-agent default.yaml (we pass it first, then a tiny override)."""
+    """Locate the default configuration file for SWE-agent.
+
+    Searches for the default.yaml configuration file in the installed
+    sweagent package directory.
+
+    Returns:
+        str: Absolute path to the default configuration file.
+
+    Raises:
+        FileNotFoundError: If default.yaml cannot be found in the expected location.
+    """
     root = Path(sys.modules["sweagent"].__file__).resolve().parent.parent
     cfg = root / "config" / "default.yaml"
     if not cfg.exists():
@@ -226,8 +336,17 @@ def locate_default_cfg() -> str:
 
 
 def make_cacheless_override() -> str:
-    """
-    Disable history processors (e.g., cache_control) to sidestep provider cache minimums by default.
+    """Create a temporary configuration file that disables caching.
+
+    Creates a YAML configuration file that disables history processors,
+    particularly cache_control, to bypass provider-imposed cache minimums.
+
+    Returns:
+        str: Path to the temporary configuration file.
+
+    Note:
+        The created file is not automatically deleted and should be managed
+        by the caller.
     """
     yml = "agent:\n  history_processors: []\n"
     tmp = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
@@ -239,7 +358,25 @@ def make_cacheless_override() -> str:
 
 # --------------------------- CLI ---------------------------
 
-def main():
+def main() -> None:
+    """Execute the main SWE runner workflow.
+
+    Sets up and runs the SWE agent with a repository pre-baked in a Docker image.
+    This includes:
+    1. Building the base Docker image (if not skipped)
+    2. Creating an overlay image with SWE runtime dependencies
+    3. Installing and configuring the SWE agent
+    4. Running the agent with the specified task and configuration
+
+    Command-line arguments control all aspects of the execution, including:
+    - Docker image building and configuration
+    - Task specification (via file or inline text)
+    - Model selection and resource limits
+    - Output and workspace configuration
+
+    Raises:
+        SystemExit: If required commands are missing or execution fails.
+    """
     ap = argparse.ArgumentParser(description="Run SWE-agent with a repo pre-baked in your Docker image (preexisting mode).")
     ap.add_argument("--dockerfile", type=Path, required=True, help="Path to your base Dockerfile.")
     ap.add_argument("--image-tag", default="myproj:latest", help="Base image tag to build and run.")
@@ -265,7 +402,7 @@ def main():
     args = ap.parse_args()
     py = sys.executable
 
-    ensure("docker")
+    ensure_command("docker")
     ensure_model_key(args.model)
 
     # 1) Build the base image (unless skipped)
