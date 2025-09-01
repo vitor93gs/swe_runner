@@ -3,3 +3,4 @@ trajectories
 .env.sweagent
 tasks
 __pycache__
+tests

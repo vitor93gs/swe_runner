@@ -71,7 +71,7 @@ def main() -> None:
         
         # Per-task naming & output folder
         instance_id = f"task_id_{tid}"
-        out_dir = Path("trajectories")  # e.g., trajectories/task_id_1
+        out_dir = Path("trajectories")
 
         image_tag = f"task{tid}:latest"
         cmd = [
