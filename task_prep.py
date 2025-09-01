@@ -9,7 +9,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from urllib.parse import urlparse, parse_qs
 
 try:
