@@ -46,15 +46,12 @@ def main() -> None:
 
     for i, row in enumerate(rows, 1):
         tid = row.get("task_id")
-        print(f"\n=== [{i}/{len(rows)}] Preparing task_id {tid} ===")
-        try:
-            paths: TaskPaths = prepare_task_folder(tasks_dir, row)
-        except Exception as e:
-            print(f"!! Skipping task_id {tid}: failed to prepare folder: {e}")
-            continue
+        paths = prepare_task_folder(tasks_dir, row)  
+        
+        # Per-task naming & output folder
+        instance_id = f"task_id_{tid}"
+        out_dir = Path("trajectories")  # e.g., trajectories/task_id_1
 
-        # Run swe_runner on this task
-        # - Give each task a unique image tag so caches/artifacts don't collide
         image_tag = f"task{tid}:latest"
         cmd = [
             sys.executable, args.swe_runner_path,
@@ -62,15 +59,11 @@ def main() -> None:
             "--image-tag", image_tag,
             "--prompt-file", str(paths.task_md),
             "--model", args.model,
+            "--instance-id", instance_id,
+            "--output-dir", str(out_dir),            
         ] + extra
 
-        print(f"--- Running SWE-agent for task_id {tid} ---")
-        try:
-            sh(cmd)
-            print(f"✅ task_id {tid} finished.")
-        except subprocess.CalledProcessError as e:
-            print(f"❌ task_id {tid} failed with exit={e.returncode}. Continuing...")
-
+        sh(cmd)
 
 if __name__ == "__main__":
     main()

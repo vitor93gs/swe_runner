@@ -25,7 +25,7 @@ def ensure(cmd: str) -> None:
         sys.exit(1)
 
 
-def ensure_model_key(model: str, allow_missing: bool = False) -> None:
+def ensure_model_key(model: str) -> None:
     """Require a reasonable provider key based on the model string."""
     model_l = model.lower()
     # load .env.sweagent if present
@@ -43,12 +43,9 @@ def ensure_model_key(model: str, allow_missing: bool = False) -> None:
     if "gemini" in model_l:
         if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
             return
-        if allow_missing:
-            print("⚠ GEMINI_API_KEY / GOOGLE_API_KEY not set in .env.sweagent; continuing anyway.", file=sys.stderr)
-            return
         print("ERROR: Put GEMINI_API_KEY (or GOOGLE_API_KEY) in .env.sweagent for Gemini models.", file=sys.stderr)
         sys.exit(1)
-    if not have and not allow_missing:
+    if not have:
         print("ERROR: No API key variables detected (looked in .env.sweagent).", file=sys.stderr)
         sys.exit(1)
 
@@ -257,7 +254,9 @@ def main():
     ap.add_argument("--cost-limit", type=float, default=3.0, help="Per-instance $ cost cap (default 3.0).")
     ap.add_argument("--call-limit", type=int, default=0, help="Per-instance API call cap (0 = unlimited).")
     ap.add_argument("--base-commit", default="HEAD", help="Commit/branch/tag to reset to (default HEAD).")
-    ap.add_argument("--allow-missing-key", action="store_true", help="Run even if no API key is set (not recommended).")
+    
+    ap.add_argument("--instance-id", help="Set problem statement ID.")
+    ap.add_argument("--output-dir", type=Path, help="Custom output directory for SWE-agent artifacts.")
 
     # power-user (optional)
     ap.add_argument("--sweagent-src", type=Path, help="Local SWE-agent repo path to use for editable install.")
@@ -267,7 +266,7 @@ def main():
     py = sys.executable
 
     ensure("docker")
-    ensure_model_key(args.model, allow_missing=args.allow_missing_key)
+    ensure_model_key(args.model)
 
     # 1) Build the base image (unless skipped)
     if not args.skip_build:
@@ -319,6 +318,13 @@ def main():
         f"--env.repo.repo_name={repo_name}",
         f"--env.repo.base_commit={args.base_commit}",
     ]
+
+    if args.output_dir:
+        out_path = Path(args.output_dir).resolve()
+        out_path.mkdir(parents=True, exist_ok=True)
+        cmd.append(f"--output_dir={str(out_path)}") 
+    if args.instance_id:
+        cmd.append(f"--problem_statement.id={args.instance_id}")
 
     if not can_reset:
         cmd.append("--env.repo.reset=False")
