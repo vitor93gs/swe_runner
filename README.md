@@ -9,7 +9,8 @@ This project provides a suite of tools for running Software Engineering (SWE) ta
 The main entry point for batch processing tasks. This script:
 - Reads task definitions from a Google Sheet or local CSV file
 - Creates individual task folders with required assets
-- Executes each task using the SWE runner in isolated environments
+- Executes each task using the SWE runner to generate solutions
+- Stores model-generated patches for later verification
 
 Usage:
 ```bash
@@ -24,7 +25,34 @@ Options:
   --swe-runner-path Path to swe_runner.py
 ```
 
-### 2. `task_prep.py`
+### 2. `verify_tasks.py`
+A verification tool for testing model-generated solutions:
+- Builds and tests each task in isolated Docker containers
+- Applies the model's proposed patches
+- Executes test commands in the correct environment
+- Generates detailed test reports and summaries
+
+Usage:
+```bash
+python verify_tasks.py [options]
+
+Options:
+  --tasks-dir         Folder containing task_id_<id>/ subfolders (default: tasks)
+  --trajectories-dir  Folder containing task patches (default: trajectories)
+  --tests-dir        Output folder for logs and summaries (default: tests)
+  --only-task-ids    Optional comma-separated task IDs to test
+  --limit            Process only first N tasks (0 = all)
+```
+
+Test outputs include:
+- Per-task logs (build.log, setup.log, test.log)
+- JSON summary with detailed results
+- Markdown summary with status tables
+- Individual task result.json files
+
+
+
+### 3. `task_prep.py`
 Handles task preparation and file management:
 - Downloads files from Google Drive
 - Creates task-specific directories
@@ -37,7 +65,7 @@ Key Features:
 - Automatic file organization
 - Support for test patches and commands
 
-### 3. `swe_runner.py`
+### 4. `swe_runner.py`
 The core execution engine that:
 - Builds and manages Docker images
 - Sets up SWE agent environments
@@ -69,9 +97,20 @@ project/
 │       ├── test_command.txt # Test command specification
 │       └── test_patch.tar  # Optional test patch
 ├── trajectories/            # Task execution outputs
-├── run_batch.py            # Main batch runner
-├── swe_runner.py          # SWE execution engine
-└── task_prep.py           # Task preparation utilities
+│   └── task_id_<N>/        # Per-task trajectories
+│       └── task_id_<N>.patch # Agent-generated patches
+├── tests/                   # Test execution outputs
+│   ├── task_id_<N>/        # Per-task test logs
+│   │   ├── build.log       # Docker build logs
+│   │   ├── setup.log      # Container setup logs
+│   │   ├── test.log       # Test execution logs
+│   │   └── result.json    # Individual test results
+│   ├── summary.json       # Detailed test summary
+│   └── summary.md        # Human-readable summary
+├── run_batch.py           # Main batch runner
+├── swe_runner.py         # SWE execution engine
+├── task_prep.py          # Task preparation utilities
+└── verify_tasks.py       # Test verification tool
 ```
 
 ## Prerequisites
@@ -94,12 +133,30 @@ Required environment variables (in `.env.sweagent`):
    ```
 
 ## Example Usage
+
+### Step 1: Task Generation and Model Solutions
 1. Create a Google Sheet with task definitions
-2. Run the batch processor:
+2. Run the batch processor to generate tasks and get model-proposed solutions:
    ```bash
    python run_batch.py --sheet "https://docs.google.com/spreadsheets/d/..." \
                       --model "gemini/gemini-2.5-pro" \
+                      --limit 5
    ```
+   This will:
+   - Create task folders in `tasks/`
+   - Run the model to generate solutions
+   - Store model-generated patches in `trajectories/`
+
+### Step 2: Verify Model Solutions
+After the model has proposed changes, verify them:
+   ```bash
+   python verify_tasks.py 
+   ```
+   This will:
+   - Build each task's Docker environment
+   - Apply the model-generated patches
+   - Run test commands
+   - Generate test reports
 
 ## Docker Integration
 The system uses a two-layer Docker approach:
