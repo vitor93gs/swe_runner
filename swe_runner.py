@@ -215,11 +215,21 @@ def build_overlay_with_rex(base_image: str, overlay_tag: str) -> None:
         ]
     elif fam == "alpine":
         lines += [
+            # base toolchain
             "RUN apk add --no-cache python3 py3-pip py3-virtualenv git curl ca-certificates",
             'ENV PATH="/root/.local/bin:${PATH}"',
-            # install pipx via pip (no ensurepath needed in Docker)
-            "RUN python3 -m pip install --no-cache-dir pipx",
+            # try system pipx; if unavailable (Alpine 3.19), create a dedicated venv for pipx
+            (
+                "RUN apk add --no-cache py3-pipx || ("
+                "python3 -m venv /opt/pipx && "
+                "/opt/pipx/bin/python -m pip install --upgrade pip && "
+                "/opt/pipx/bin/python -m pip install pipx && "
+                "ln -sf /opt/pipx/bin/pipx /usr/local/bin/pipx"
+                ")"
+            ),
+            # provide `python` shim if only python3 exists
             'RUN command -v python >/dev/null 2>&1 || ln -sf "$(command -v python3)" /usr/local/bin/python',
+            # install the runtime CLI for SWE-agent
             "RUN pipx install swe-rex",
         ]
     elif fam == "rhel":
