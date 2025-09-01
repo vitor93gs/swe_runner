@@ -1,5 +1,5 @@
 venv
 trajectories
 .env.sweagent
-__pycache__
 tasks
+__pycache__
