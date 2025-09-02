@@ -7,6 +7,8 @@ import re
 import sys
 import shutil
 import subprocess
+import os
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -21,20 +23,61 @@ except Exception:
 # --------------------------- small shell helper ---------------------------
 
 def sh(cmd: List[str], **kw) -> subprocess.CompletedProcess:
-    """Execute a shell command and return its result.
+    """Execute a shell command and return its result, teeing to a log if set.
+
+    If the environment variable `SWE_TASK_LOG` is present, this function will
+    stream combined stdout/stderr to both the console and the referenced log
+    file. This lets callers (e.g., run_batch) capture gdown/curl output.
 
     Args:
-        cmd (List[str]): Command to execute as a list of strings.
-        **kw: Additional keyword arguments to pass to subprocess.run.
+        cmd (List[str]): Command to execute (list of tokens).
+        **kw: Additional keyword arguments. Supports a `check` bool like
+            `subprocess.run`; other kwargs are passed to the underlying call.
 
     Returns:
-        subprocess.CompletedProcess: Result of the command execution.
+        subprocess.CompletedProcess: Result with returncode and args set.
 
     Raises:
-        subprocess.CalledProcessError: If the command returns a non-zero exit status.
+        subprocess.CalledProcessError: If the process exits non-zero and
+            `check=True`.
     """
+    import shlex
+
     print("▶", " ".join(map(str, cmd)))
-    return subprocess.run(cmd, check=True, text=True, **kw)
+    log_path = os.environ.get("SWE_TASK_LOG")
+
+    # Emulate subprocess.run's 'check' behavior, but don't pass it into Popen/run twice.
+    check = kw.pop("check", True)
+
+    if log_path:
+        log_file = Path(log_path)
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+
+        with log_file.open("a", encoding="utf-8") as lf:
+            lf.write("$ " + " ".join(shlex.quote(str(x)) for x in cmd) + "\n")
+
+        popen_kw = {k: v for k, v in kw.items() if k not in {"stdout", "stderr", "text", "encoding", "check"}}
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            **popen_kw,
+        )
+        assert proc.stdout is not None
+        with log_file.open("a", encoding="utf-8") as lf:
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                lf.write(line)
+        ret = proc.wait()
+        if check and ret != 0:
+            raise subprocess.CalledProcessError(ret, cmd)
+        return subprocess.CompletedProcess(cmd, ret)
+
+    # Default simple path (no tee): avoid passing duplicate 'check'
+    run_kw = kw.copy()
+    run_kw.pop("text", None)  # we set it explicitly
+    return subprocess.run(cmd, check=check, text=True, **run_kw)
 
 
 # --------------------------- Google Sheets helpers ---------------------------
