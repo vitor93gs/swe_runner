@@ -458,7 +458,7 @@ def process_task(tp: TaskPaths, default_repo_dir: str = "/app") -> Dict[str, obj
             
             if not agent_patch_success:
                 result["notes"].append("Agent patch did not apply")
-                result["fail_reason"] = "agent patch did not apply"
+                result["fail_reason"] = "Agent patch did not apply"
                 result["test_ok"] = False
                 result["test_exit_code"] = None
                 return result
