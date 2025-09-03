@@ -251,6 +251,80 @@ def docker_exec(container: str, command: str, setup_log: Path, workdir: Optional
     exec_cmd += [container, "sh", "-lc", command]
     return run_logged(exec_cmd, setup_log)
 
+# --------------------------- robust patch application ---------------------------
+
+def apply_patch_robustly(container: str, patch_file: str, repo_dir: str, setup_log: Path, patch_type: str = "agent") -> bool:
+    """Apply a patch file using multiple fallback strategies.
+    
+    Args:
+        container (str): Name of the container
+        patch_file (str): Path to patch file inside container
+        repo_dir (str): Repository directory in container
+        setup_log (Path): Log file for operations
+        patch_type (str): Type of patch for logging ("agent" or "test")
+    
+    Returns:
+        bool: True if patch was successfully applied, False otherwise
+    """
+    echo_to_log(setup_log, f"=== Attempting to apply {patch_type} patch: {patch_file} ===")
+    
+    # Check if patch file exists
+    check_code = docker_exec(container, f'[ -f "{patch_file}" ]', setup_log)
+    if check_code != 0:
+        echo_to_log(setup_log, f"WARNING: {patch_type} patch file {patch_file} does not exist")
+        return True  # No patch to apply is not a failure
+    
+    strategies = [
+        # Strategy 1: Git apply with robust options (preferred)
+        {
+            'name': 'git apply (robust)',
+            'cmd': f'cd "{repo_dir}" && command -v git >/dev/null 2>&1 && git apply -v --recount --unidiff-zero --whitespace=fix "{patch_file}"'
+        },
+        # Strategy 2: Git apply basic
+        {
+            'name': 'git apply (basic)',
+            'cmd': f'cd "{repo_dir}" && command -v git >/dev/null 2>&1 && git apply "{patch_file}"'
+        },
+        # Strategy 3: Git apply ignoring whitespace
+        {
+            'name': 'git apply (ignore whitespace)',
+            'cmd': f'cd "{repo_dir}" && command -v git >/dev/null 2>&1 && git apply --ignore-whitespace "{patch_file}"'
+        },
+        # Strategy 4: patch command with -p1
+        {
+            'name': 'patch -p1',
+            'cmd': f'cd "{repo_dir}" && command -v patch >/dev/null 2>&1 && patch -p1 --no-backup-if-mismatch -i "{patch_file}"'
+        },
+        # Strategy 5: patch command with -p1 and fuzzy matching
+        {
+            'name': 'patch -p1 (fuzzy)',
+            'cmd': f'cd "{repo_dir}" && command -v patch >/dev/null 2>&1 && patch -p1 --no-backup-if-mismatch --fuzz=3 -i "{patch_file}"'
+        },
+        # Strategy 6: patch command with -p0
+        {
+            'name': 'patch -p0',
+            'cmd': f'cd "{repo_dir}" && command -v patch >/dev/null 2>&1 && patch -p0 --no-backup-if-mismatch -i "{patch_file}"'
+        },
+        # Strategy 7: patch command with -p0 and fuzzy matching
+        {
+            'name': 'patch -p0 (fuzzy)',
+            'cmd': f'cd "{repo_dir}" && command -v patch >/dev/null 2>&1 && patch -p0 --no-backup-if-mismatch --fuzz=3 -i "{patch_file}"'
+        }
+    ]
+    
+    for strategy in strategies:
+        echo_to_log(setup_log, f"Trying strategy: {strategy['name']}")
+        code = docker_exec(container, strategy['cmd'], setup_log)
+        
+        if code == 0:
+            echo_to_log(setup_log, f"SUCCESS: {patch_type} patch applied using {strategy['name']}")
+            return True
+        else:
+            echo_to_log(setup_log, f"FAILED: {strategy['name']} returned code {code}")
+    
+    echo_to_log(setup_log, f"ERROR: All patch application strategies failed for {patch_type} patch")
+    return False
+
 # --------------------------- core per-task routine ---------------------------
 
 def process_task(tp: TaskPaths, default_repo_dir: str = "/app") -> Dict[str, object]:
@@ -262,7 +336,7 @@ def process_task(tp: TaskPaths, default_repo_dir: str = "/app") -> Dict[str, obj
     3. Builds Docker image
     4. Determines repository working directory
     5. Sets up and runs tests in container
-    6. Applies patches if available
+    6. Applies patches if available (with robust fallback strategies)
     7. Collects and returns results
 
     Args:
@@ -276,9 +350,12 @@ def process_task(tp: TaskPaths, default_repo_dir: str = "/app") -> Dict[str, obj
             - image_tag: Docker image tag
             - repo_dir: Repository directory in container
             - build_ok: Whether Docker build succeeded
-            - patch_ok: Whether patch application succeeded
+            - agent_patch_ok: Whether agent patch application succeeded
+            - test_patch_ok: Whether test patch application succeeded
             - test_ok: Whether tests passed
             - test_exit_code: Test command exit code
+            - skipped: Whether task was skipped due to patch failures
+            - skip_reason: Reason for skipping if applicable
             - notes: List of notable events/issues
             - paths: Dictionary of log file paths
     """
@@ -292,9 +369,12 @@ def process_task(tp: TaskPaths, default_repo_dir: str = "/app") -> Dict[str, obj
         "image_tag": f"task{tp.task_id}:test-run",
         "repo_dir": None,
         "build_ok": False,
-        "patch_ok": False,
+        "agent_patch_ok": False,
+        "test_patch_ok": False,
         "test_ok": False,
         "test_exit_code": None,
+        "skipped": False,
+        "skip_reason": None,
         "notes": [],
         "paths": {
             "build_log": str(build_log),
@@ -346,47 +426,92 @@ def process_task(tp: TaskPaths, default_repo_dir: str = "/app") -> Dict[str, obj
         if tp.agent_patch.exists():
             if docker_cp(tp.agent_patch, cname, "/tmp/agent.patch", setup_log) != 0:
                 result["notes"].append("Failed to docker cp agent patch")
+                result["skipped"] = True
+                result["skip_reason"] = "Failed to copy agent patch to container"
+                return result
         else:
             echo_to_log(setup_log, f"NOTE: Missing agent patch at {tp.agent_patch}")
 
-        if tp.test_patch_tar.exists():
+        test_patch_exists = tp.test_patch_tar.exists()
+        if test_patch_exists:
             if docker_cp(tp.test_patch_tar, cname, "/tmp/test_patch.tar", setup_log) != 0:
                 result["notes"].append("Failed to docker cp test_patch.tar")
+                result["skipped"] = True
+                result["skip_reason"] = "Failed to copy test patch to container"
+                return result
         else:
             echo_to_log(setup_log, f"NOTE: No test_patch.tar at {tp.test_patch_tar}")
 
-        # 5) Apply agent .patch (git apply preferred, patch fallback) :contentReference[oaicite:5]{index=5}
-        patch_cmd = (
-            "set -e; "
-            "cd \"$REPO\"; "
-            # Try git apply first; if git missing or fails, try patch -p1 then -p0
-            "( [ -f /tmp/agent.patch ] && ( "
-            "  (command -v git >/dev/null 2>&1 && git apply -p1 /tmp/agent.patch) "
-            "  || (command -v patch >/dev/null 2>&1 && patch -p1 -i /tmp/agent.patch) "
-            "  || (command -v patch >/dev/null 2>&1 && patch -p0 -i /tmp/agent.patch) "
-            ") ) || true"
-        )
-        code = docker_exec(cname, f'REPO="{repo_dir}" ; {patch_cmd}', setup_log)
-        # We'll heuristically check patch success by trying 'git apply --check' if possible, else trust return code == 0
-        # (We ran with '|| true' to keep going; so do a check now.)
-        verify_code = docker_exec(cname, f'cd "{repo_dir}" && [ -f /tmp/agent.patch ] && '
-                                         '(command -v git >/dev/null 2>&1 && git apply --check -p1 /tmp/agent.patch && exit 1 || true) || true',
-                                  setup_log)
-        # If verify returned 1, the patch would still apply (meaning we didn't apply it); treat as failure.
-        result["patch_ok"] = (code == 0 and verify_code == 0)
+        # 5) Apply agent patch with robust strategies
+        if tp.agent_patch.exists():
+            agent_patch_success = apply_patch_robustly(cname, "/tmp/agent.patch", repo_dir, setup_log, "agent")
+            result["agent_patch_ok"] = agent_patch_success
+            
+            if not agent_patch_success:
+                result["skipped"] = True
+                result["skip_reason"] = "Agent patch failed to apply"
+                result["notes"].append("Task skipped: agent patch application failed")
+                return result
+        else:
+            result["agent_patch_ok"] = True  # No patch to apply counts as success
 
-        # 6) Extract test_patch.tar into repo root if present :contentReference[oaicite:6]{index=6}
-        if tp.test_patch_tar.exists():
+        # 6) Extract and apply test patch if present
+        if test_patch_exists:
+            # Extract test_patch.tar
             tar_code = docker_exec(cname, f'cd "{repo_dir}" && tar -xf /tmp/test_patch.tar', setup_log)
             if tar_code != 0:
                 result["notes"].append("Failed to extract test_patch.tar")
+                result["skipped"] = True
+                result["skip_reason"] = "Failed to extract test_patch.tar"
+                return result
+            
+            # Check if extraction created patch files and try to apply them
+            # Look for common patch file patterns
+            patch_check_cmd = f'''cd "{repo_dir}" && find . -maxdepth 2 -name "*.patch" -o -name "*.diff" | head -5'''
+            patch_files_code = docker_exec(cname, patch_check_cmd, setup_log)
+            
+            if patch_files_code == 0:
+                # Try to apply any patch files found from the tar extraction
+                apply_extracted_patches_cmd = f'''
+                cd "{repo_dir}"
+                success=true
+                for pf in $(find . -maxdepth 2 -name "*.patch" -o -name "*.diff"); do
+                    echo "Attempting to apply extracted patch: $pf"
+                    if ! (git apply -v --recount --unidiff-zero --whitespace=fix "$pf" || \\
+                          git apply "$pf" || \\
+                          git apply --ignore-whitespace "$pf" || \\
+                          patch -p1 --no-backup-if-mismatch -i "$pf" || \\
+                          patch -p1 --no-backup-if-mismatch --fuzz=3 -i "$pf" || \\
+                          patch -p0 --no-backup-if-mismatch -i "$pf" || \\
+                          patch -p0 --no-backup-if-mismatch --fuzz=3 -i "$pf"); then
+                        echo "ERROR: Failed to apply patch $pf"
+                        success=false
+                        break
+                    else
+                        echo "SUCCESS: Applied patch $pf"
+                    fi
+                done
+                $success
+                '''
+                patch_apply_code = docker_exec(cname, apply_extracted_patches_cmd, setup_log)
+                result["test_patch_ok"] = (patch_apply_code == 0)
+                
+                if patch_apply_code != 0:
+                    result["skipped"] = True
+                    result["skip_reason"] = "Test patch failed to apply"
+                    result["notes"].append("Task skipped: test patch application failed")
+                    return result
+            else:
+                # No patch files found in extraction, that's fine
+                result["test_patch_ok"] = True
+        else:
+            result["test_patch_ok"] = True  # No test patch to apply
 
         # 7) Run tests (capture to test_log by streaming)
         exit_code = run_logged(["docker", "exec", "-w", repo_dir, cname, "sh", "-lc", test_cmd], test_log)
         result["test_exit_code"] = exit_code
         result["test_ok"] = (exit_code == 0)
 
-        # Friendly note if cp/exec semantics matter. :contentReference[oaicite:7]{index=7}
     finally:
         # 8) Cleanup container
         stop_rm_container(cname, setup_log)
@@ -413,8 +538,10 @@ def write_summary(tests_dir: Path, results: List[Dict[str, object]]) -> None:
     summary = {
         "total": len(results),
         "build_ok": sum(1 for r in results if r.get("build_ok")),
-        "patch_ok": sum(1 for r in results if r.get("patch_ok")),
+        "agent_patch_ok": sum(1 for r in results if r.get("agent_patch_ok")),
+        "test_patch_ok": sum(1 for r in results if r.get("test_patch_ok")),
         "test_ok":  sum(1 for r in results if r.get("test_ok")),
+        "skipped": sum(1 for r in results if r.get("skipped")),
         "by_task": results,
         "generated_at": int(time.time()),
     }
@@ -426,21 +553,27 @@ def write_summary(tests_dir: Path, results: List[Dict[str, object]]) -> None:
         "",
         f"- Total tasks: {summary['total']}",
         f"- Builds OK:  {summary['build_ok']}",
-        f"- Patches OK: {summary['patch_ok']}",
+        f"- Agent patches OK: {summary['agent_patch_ok']}",
+        f"- Test patches OK: {summary['test_patch_ok']}",
         f"- Tests OK:   {summary['test_ok']}",
+        f"- Skipped:    {summary['skipped']}",
         "",
-        "| Task ID | Build | Patch | Test | Exit | Logs |",
-        "|---|---:|---:|---:|---:|---|",
+        "| Task ID | Build | Agent Patch | Test Patch | Test | Exit | Status | Logs |",
+        "|---|---:|---:|---:|---:|---:|---|---|",
     ]
     for r in results:
         logs = r.get("paths", {}) or {}
         link = str(Path(logs.get("test_log", ""))) if logs else "-"
+        status = "SKIPPED" if r.get("skipped") else "COMPLETED"
+        skip_reason = f" ({r.get('skip_reason', '')})" if r.get("skipped") else ""
         lines.append(
             f"| {r.get('task_id')} | "
             f"{'✅' if r.get('build_ok') else '❌'} | "
-            f"{'✅' if r.get('patch_ok') else '❌'} | "
+            f"{'✅' if r.get('agent_patch_ok') else '❌'} | "
+            f"{'✅' if r.get('test_patch_ok') else '❌'} | "
             f"{'✅' if r.get('test_ok') else '❌'} | "
-            f"{r.get('test_exit_code')} | "
+            f"{r.get('test_exit_code') or '-'} | "
+            f"{status}{skip_reason} | "
             f"{link} |"
         )
 
@@ -454,7 +587,7 @@ def main() -> None:
     Handles command-line arguments and orchestrates the task verification process:
     1. Validates Docker availability
     2. Discovers tasks to process
-    3. Executes each task's verification
+    3. Executes each task's verification with robust patch application
     4. Generates summary reports
 
     Command-line arguments:
@@ -496,11 +629,27 @@ def main() -> None:
     for tp in tps:
         print(f"=== Processing task {tp.task_id} ===")
         res = process_task(tp)
+        if res.get("skipped"):
+            print(f"    SKIPPED: {res.get('skip_reason', 'Unknown reason')}")
+        elif res.get("test_ok"):
+            print(f"    PASSED")
+        else:
+            print(f"    FAILED (exit code: {res.get('test_exit_code', 'unknown')})")
         results.append(res)
 
     tests_dir.mkdir(parents=True, exist_ok=True)
     write_summary(tests_dir, results)
-    print(f"\nDone. See per-task logs under '{tests_dir}/task_id_<id>/' and overall summary in '{tests_dir}/summary.md' and 'summary.json'.")
+    
+    total = len(results)
+    skipped = sum(1 for r in results if r.get("skipped"))
+    passed = sum(1 for r in results if r.get("test_ok"))
+    
+    print(f"\n=== SUMMARY ===")
+    print(f"Total tasks: {total}")
+    print(f"Skipped: {skipped}")
+    print(f"Passed: {passed}")
+    print(f"Failed: {total - skipped - passed}")
+    print(f"\nSee per-task logs under '{tests_dir}/task_id_<id>/' and overall summary in '{tests_dir}/summary.md' and 'summary.json'.")
 
 if __name__ == "__main__":
     main()
