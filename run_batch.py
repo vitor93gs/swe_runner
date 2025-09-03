@@ -73,11 +73,16 @@ def sh(cmd: List[str], log_file: Optional[Path] = None, **kw) -> subprocess.Comp
 
 
 def main() -> None:
-    """Execute the main batch processing logic for running SWE tasks.
+    """
+    Execute the main batch processing logic for running SWE tasks.
 
-    Enhancements in this version:
+    This function handles command line argument parsing and orchestrates the execution of multiple
+    SWE tasks defined in a Google Sheet or CSV file. Each task is processed using swe_runner.py
+    in its own environment with task-specific configurations.
+
+    Key features include:
       - Per-task logging to trajectories/logs/<instance_id>/run.log
-      - Continue processing subsequent tasks even if one fails
+      - Processing subsequent tasks even if one fails
       - End-of-run summary with paths to logs
 
     Returns:
