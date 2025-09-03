@@ -8,7 +8,6 @@ import sys
 import shutil
 import subprocess
 import os
-import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -193,6 +192,75 @@ def read_tasks_from_sheet(sheet_src: str) -> List[Dict[str, str]]:
         rows.append(row)
     return rows
 
+def _strip_wrapping_quotes(s: str) -> str:
+    """Remove a single layer of matching quotes from a string if present.
+
+    This is useful when CSV exporters wrap cell contents in single or double
+    quotes. Only a single, balanced pair at the extremes is removed.
+
+    Args:
+        s (str): Input string potentially wrapped in quotes.
+
+    Returns:
+        str: String without a single outer layer of matching quotes.
+    """
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in {"'", '"'}:
+        return s[1:-1]
+    return s
+
+def _extract_fenced_block(s: str) -> Optional[str]:
+    """Extract inner text from a full fenced code block, if present.
+
+    Accepts variations like:
+        ```dockerfile
+        ...
+        ```
+    or:
+        ```
+        ...
+        ```
+
+    The match must span the entire string (ignoring leading/trailing
+    whitespace). The language hint is optional and not enforced.
+
+    Args:
+        s (str): Candidate text containing a fenced code block.
+
+    Returns:
+        Optional[str]: Inner code text if a full fenced block is detected,
+            otherwise None.
+    """
+    text = s.strip()
+    m = re.match(
+        r"^```[ \t]*([A-Za-z0-9_-]+)?[ \t]*\n(.*?)\n```[ \t]*$",
+        text,
+        flags=re.DOTALL,
+    )
+    return m.group(2) if m else None
+
+def _looks_like_dockerfile_text(s: str) -> bool:
+    """Heuristically determine if a string is inline Dockerfile content.
+
+    Heuristics:
+      - Contains at least one newline (to avoid simple URLs/paths).
+      - First non-whitespace token resembles a Dockerfile directive or comment.
+
+    Args:
+        s (str): Candidate text to evaluate.
+
+    Returns:
+        bool: True if the text looks like Dockerfile content, False otherwise.
+    """
+    head = s.lstrip()
+    if "\n" not in s:
+        return False
+    return bool(
+        re.match(
+            r"(#|FROM|ARG|ENV|RUN|WORKDIR|ENTRYPOINT|CMD|COPY|ADD|LABEL|USER|EXPOSE|VOLUME|STOPSIGNAL|HEALTHCHECK|SHELL|ONBUILD)\b",
+            head,
+            flags=re.IGNORECASE,
+        )
+    )
 
 # --------------------------- Google Drive download helpers ---------------------------
 
@@ -316,16 +384,20 @@ def prepare_task_folder(base_dir: Path, row: Dict[str, str]) -> TaskPaths:
 
     Creates a directory named 'task_id_<ID>' under base_dir and populates it with:
     1. task.md - Task description file
-    2. Dockerfile - From Drive link or local path
+    2. Dockerfile - One of:
+         - Inline Dockerfile content provided directly in the CSV cell
+           (supports fenced code blocks like ```dockerfile ... ``` or raw text), or
+         - A URL (e.g., Google Drive) which will be downloaded, or
+         - A local filesystem path that will be copied.
     3. test_command.txt - Test command specification
-    4. test_patch.tar - Optional test patch file from Drive link
+    4. test_patch.tar - Optional test patch file from Drive link or local path
 
     Args:
         base_dir (Path): Base directory where task folder will be created.
         row (Dict[str, str]): Task data from spreadsheet with following keys:
             - task_id: Unique identifier for the task
             - updated_issue_description: Content for task.md
-            - dockerfile: Source path/URL for Dockerfile
+            - dockerfile: Inline Dockerfile text, fenced code block, URL, or local path
             - test_command: Content for test_command.txt
             - test_patch: Optional source path/URL for test patch
 
@@ -348,21 +420,43 @@ def prepare_task_folder(base_dir: Path, row: Dict[str, str]) -> TaskPaths:
         desc = desc[1:-1]
     task_md.write_text(desc + ("\n" if not desc.endswith("\n") else ""), encoding="utf-8")
 
-    # 2) Dockerfile (from Drive link or local path)
+    # 2) Dockerfile (inline content, URL, or local path)
     dockerfile_target = root / "Dockerfile"
-    docker_src = row.get("dockerfile", "").strip()
-    if docker_src:
+    docker_src = _strip_wrapping_quotes(row.get("dockerfile", "").strip())
+    if not docker_src:
+        raise ValueError(f"Row {task_id}: missing 'dockerfile' value")
+
+    # 2a) Fenced code block (e.g., ```dockerfile ... ```)
+    fenced = _extract_fenced_block(docker_src)
+    if fenced is not None:
+        content = fenced
+        dockerfile_target.write_text(
+            content + ("" if content.endswith("\n") else "\n"),
+            encoding="utf-8",
+        )
+
+    # 2b) Raw inline Dockerfile text without fences
+    elif _looks_like_dockerfile_text(docker_src):
+        content = docker_src
+        dockerfile_target.write_text(
+            content + ("" if content.endswith("\n") else "\n"),
+            encoding="utf-8",
+        )
+
+    # 2c) Otherwise treat as URL or local path
+    else:
         if _is_http_url(docker_src):
             download_drive_file(docker_src, dockerfile_target)
         else:
             shutil.copyfile(docker_src, dockerfile_target)
-    else:
-        raise ValueError(f"Row {task_id}: missing 'dockerfile' value")
 
-    # 3) test_command -> save as text (even if we ignore it at runtime)
+    # 3) test_command -> save as text (even if ignored at runtime)
     test_cmd_path = root / "test_command.txt"
     test_cmd_val = row.get("test_command", "").strip()
-    test_cmd_path.write_text(test_cmd_val + ("\n" if not test_cmd_val.endswith("\n") else ""), encoding="utf-8")
+    test_cmd_path.write_text(
+        test_cmd_val + ("\n" if not test_cmd_val.endswith("\n") else ""),
+        encoding="utf-8",
+    )
 
     # 4) test_patch (.tar from Drive link, optional)
     test_patch_path = root / "test_patch.tar"
