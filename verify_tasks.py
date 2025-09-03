@@ -409,6 +409,14 @@ def process_task(tp: TaskPaths, default_repo_dir: str = "/app") -> Dict[str, obj
     if build_code != 0:
         result["notes"].append("Docker build failed")
         return result
+    
+    # 1.5) Require agent patch; skip task if not present
+    if not tp.agent_patch.exists():
+        echo_to_log(setup_log, f"SKIP: Missing agent patch at {tp.agent_patch}")
+        result["notes"].append("Missing agent patch; skipping task")
+        result["skipped"] = True
+        result["skip_reason"] = "Missing agent patch"
+        return result
 
     # 2) Determine repo workdir in image (inspect -> Dockerfile -> /app)
     repo_dir = image_workdir(image_tag) or parse_workdir_from_dockerfile(tp.dockerfile) or default_repo_dir
