@@ -356,6 +356,7 @@ def process_task(tp: TaskPaths, default_repo_dir: str = "/app") -> Dict[str, obj
             - test_exit_code: Test command exit code
             - skipped: Whether task was skipped due to patch failures
             - skip_reason: Reason for skipping if applicable
+            - fail_reason: Reason for failure if not skipped and not passed
             - notes: List of notable events/issues
             - paths: Dictionary of log file paths
     """
@@ -456,9 +457,10 @@ def process_task(tp: TaskPaths, default_repo_dir: str = "/app") -> Dict[str, obj
             result["agent_patch_ok"] = agent_patch_success
             
             if not agent_patch_success:
-                result["skipped"] = True
-                result["skip_reason"] = "Agent patch failed to apply"
-                result["notes"].append("Task skipped: agent patch application failed")
+                result["notes"].append("Agent patch did not apply")
+                result["fail_reason"] = "agent patch did not apply"
+                result["test_ok"] = False
+                result["test_exit_code"] = None
                 return result
         else:
             result["agent_patch_ok"] = True  # No patch to apply counts as success
@@ -572,7 +574,13 @@ def write_summary(tests_dir: Path, results: List[Dict[str, object]]) -> None:
     for r in results:
         logs = r.get("paths", {}) or {}
         link = str(Path(logs.get("test_log", ""))) if logs else "-"
-        status = "SKIPPED" if r.get("skipped") else "COMPLETED"
+        if r.get("skipped"):
+            status = "SKIPPED"
+        elif r.get("test_ok"):
+            status = "PASSED"
+        else:
+            fr = r.get("fail_reason")
+            status = f"FAILED{f' ({fr})' if fr else ''}"
         skip_reason = f" ({r.get('skip_reason', '')})" if r.get("skipped") else ""
         lines.append(
             f"| {r.get('task_id')} | "
@@ -642,7 +650,11 @@ def main() -> None:
         elif res.get("test_ok"):
             print(f"    PASSED")
         else:
-            print(f"    FAILED (exit code: {res.get('test_exit_code', 'unknown')})")
+            fr = res.get("fail_reason")
+            if fr:
+                print(f"    FAILED: {fr}")
+            else:
+                print(f"    FAILED (exit code: {res.get('test_exit_code', 'unknown')})")
         results.append(res)
 
     tests_dir.mkdir(parents=True, exist_ok=True)
