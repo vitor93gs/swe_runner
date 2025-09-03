@@ -199,7 +199,7 @@ def build_overlay_with_rex(base_image: str, overlay_tag: str) -> None:
     """
     fam = detect_os_family(base_image)
 
-    lines = [f"FROM {base_image}", "USER root", 'SHELL ["/bin/sh", "-lc"]']
+    lines = [f"FROM {base_image}", "USER root"]
 
     if fam == "debian":
         lines += [
@@ -278,8 +278,6 @@ def add_repo_symlink_to_overlay(overlay_tag: str, repo_dir: str, repo_name: str)
     """
     dockerfile = (
         f"FROM {overlay_tag}\n"
-        'SHELL ["/bin/sh","-lc"]\n'
-        # Create/overwrite a root-level alias so SWE-agent can `cd /<repo_name>`
         f'RUN ln -sfn "{repo_dir}" "/{repo_name}" || true\n'
     )
     with tempfile.TemporaryDirectory() as tmp:
@@ -304,6 +302,7 @@ def ensure_sweagent_from_source(python_exe: str, local_src: Path | None, ref: st
         ImportError: If sweagent module cannot be imported after installation.
         subprocess.CalledProcessError: If git clone or pip install fails.
     """
+    # First try importing in current process
     try:
         __import__("sweagent")
         return
@@ -323,7 +322,16 @@ def ensure_sweagent_from_source(python_exe: str, local_src: Path | None, ref: st
 
     sh([python_exe, "-m", "pip", "install", "--upgrade", "pip"])
     sh([python_exe, "-m", "pip", "install", "--editable", str(local_src)])
-    __import__("sweagent")
+    
+    # Test import using the same Python executable that was used for installation
+    try:
+        subprocess.run([python_exe, "-c", "import sweagent"], check=True, 
+                      capture_output=True, text=True)
+        print("✓ sweagent successfully installed and importable")
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: sweagent installation failed - cannot import module", file=sys.stderr)
+        print(f"Import error: {e.stderr}", file=sys.stderr)
+        raise
 
 
 def locate_default_cfg() -> str:
