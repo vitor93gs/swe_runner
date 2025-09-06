@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
-from task_prep import read_tasks_from_sheet, prepare_task_folder, TaskPaths
+from task_prep import read_tasks_from_sheet, prepare_task_folder
 
 
 def sh(cmd: List[str], log_file: Optional[Path] = None, **kw) -> subprocess.CompletedProcess:
@@ -96,7 +96,7 @@ def main() -> None:
     ap.add_argument("--model", default="gemini/gemini-2.5-pro", help="LiteLLM model string for swe_runner (e.g., gemini/gemini-2.5-pro)")
     ap.add_argument("--limit", type=int, default=0, help="Process only the first N tasks (0 = all)")
     ap.add_argument("--only-task-ids", default="", help="Comma-separated task IDs to include (optional)")
-    ap.add_argument("--swe-runner-path", default=str(Path(__file__).parent / "swe_runner.py"),
+    ap.add_argument("--swe-runner-path", default=str(Path(__file__).parent / "runners/swe_runner.py"),
                     help="Path to your existing swe_runner.py (default: alongside this script)")
 
     # Any extra args (e.g., --cost-limit, --call-limit, --base-commit, --allow-missing-key, --skip-build, --overlay-tag, --docker-platform, etc.)
